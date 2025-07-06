@@ -412,7 +412,7 @@ class LeggedRobot(BaseTask):
             self.motor_strength[0] - 1, 
             self.motor_strength[1] - 1
         ), dim=-1)
-        if self.cfg.terrain.measure_heights:
+        if self.cfg.terrain.measure_heights:    # 地形的扫描点
             heights = torch.clip(self.root_states[:, 2].unsqueeze(1) - 0.3 - self.measured_heights, -1, 1.)
             self.obs_buf = torch.cat([obs_buf, heights, priv_explicit, priv_latent, self.obs_history_buf.view(self.num_envs, -1)], dim=-1)
         else:

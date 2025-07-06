@@ -65,12 +65,12 @@ class OnPolicyRunner:
         self.env = env
 
         print("Using MLP and Priviliged Env encoder ActorCritic structure")
-        actor_critic: ActorCriticRMA = ActorCriticRMA(self.env.cfg.env.n_proprio,
-                                                      self.env.cfg.env.n_scan,
-                                                      self.env.num_obs,
-                                                      self.env.cfg.env.n_priv_latent,
-                                                      self.env.cfg.env.n_priv,
-                                                      self.env.cfg.env.history_len,
+        actor_critic: ActorCriticRMA = ActorCriticRMA(self.env.cfg.env.n_proprio,   # 每个时间步的状态维度
+                                                      self.env.cfg.env.n_scan,      # 扫描数据的维度
+                                                      self.env.num_obs,             # 总观测空间的维度
+                                                      self.env.cfg.env.n_priv_latent,# 特权状态的潜在维度
+                                                      self.env.cfg.env.n_priv,      # 特权显式状态的维度，比如线速度
+                                                      self.env.cfg.env.history_len, # 历史长度
                                                       self.env.num_actions,
                                                       **self.policy_cfg).to(self.device)
         estimator = Estimator(input_dim=env.cfg.env.n_proprio, output_dim=env.cfg.env.n_priv, hidden_dims=self.estimator_cfg["hidden_dims"]).to(self.device)
@@ -117,7 +117,7 @@ class OnPolicyRunner:
         self.tot_time = 0
         self.current_learning_iteration = 0
         
-
+    # 训练教师策略的同时，训练历史信息编码器、显式特权观察的编码器
     def learn_RL(self, num_learning_iterations, init_at_random_ep_len=False):
         mean_value_loss = 0.
         mean_surrogate_loss = 0.
@@ -162,6 +162,11 @@ class OnPolicyRunner:
             with torch.inference_mode():
                 for i in range(self.num_steps_per_env):
                     actions = self.alg.act(obs, critic_obs, infos, hist_encoding)
+                    # obs的变化过程：
+                    # 0. act前obs包含： 普通的obs， 扫描点、显示特权观察、 隐式特权观察
+                    # 1. 首先使用est替换真实的速度等等显式的特权状态
+                    # 2. 根据hist_encoding ， 如果为True，则使用历史编码器对obs进行编码，为false使用 pri_obs编码 替换 pri_obs这一项
+                    # 输入网络前，obs包含： 普通的obs， 扫描点或历史obs编码后的latent、显示特权观察的估计、 从隐式特权观察和整个obs的历史编码得到的latent
                     obs, privileged_obs, rewards, dones, infos = self.env.step(actions)  # obs has changed to next_obs !! if done obs has been reset
                     critic_obs = privileged_obs if privileged_obs is not None else obs
                     obs, critic_obs, rewards, dones = obs.to(self.device), critic_obs.to(self.device), rewards.to(self.device), dones.to(self.device)
@@ -194,11 +199,11 @@ class OnPolicyRunner:
                 # Learning step
                 start = stop
                 self.alg.compute_returns(critic_obs)
-            
+            # 训练AC网络以及显示特权的编码器
             mean_value_loss, mean_surrogate_loss, mean_estimator_loss, mean_disc_loss, mean_disc_acc, mean_priv_reg_loss, priv_reg_coef = self.alg.update()
             if hist_encoding:
                 print("Updating dagger...")
-                mean_hist_latent_loss = self.alg.update_dagger()
+                mean_hist_latent_loss = self.alg.update_dagger()    # 训练历史obs编码器
             
             stop = time.time()
             learn_time = stop - start
@@ -218,6 +223,7 @@ class OnPolicyRunner:
         # self.current_learning_iteration += num_learning_iterations
         self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))
 
+    # 训练actions和yaw角度预测(师生)，完全是模仿学习，环境交互只是收集数据
     def learn_vision(self, num_learning_iterations, init_at_random_ep_len=False):
         tot_iter = self.current_learning_iteration + num_learning_iterations
         self.start_learning_iteration = copy(self.current_learning_iteration)
@@ -231,11 +237,11 @@ class OnPolicyRunner:
         obs = self.env.get_observations()
         infos = {}
         infos["depth"] = self.env.depth_buffer.clone().to(self.device)[:, -1] if self.if_depth else None
-        infos["delta_yaw_ok"] = torch.ones(self.env.num_envs, dtype=torch.bool, device=self.device)
+        infos["delta_yaw_ok"] = torch.ones(self.env.num_envs, dtype=torch.bool, device=self.device) # 用于判断学生策略预测的偏航角是否在可接受范围内
         self.alg.depth_encoder.train()
         self.alg.depth_actor.train()
 
-        num_pretrain_iter = 0
+        num_pretrain_iter = 0   #  设置一个预训练迭代次数。在这个阶段，环境会使用教师策略的动作来推进，而不是学生策略的动作。这可以帮助在学生策略还很不稳定时收集更有效的数据。
         for it in range(self.current_learning_iteration, tot_iter):
             start = time.time()
             depth_latent_buffer = []
@@ -247,11 +253,13 @@ class OnPolicyRunner:
             delta_yaw_ok_buffer = []
             for i in range(self.depth_encoder_cfg["num_steps_per_env"]):
                 if infos["depth"] != None:
+                    # 教师策略
                     with torch.no_grad():
                         scandots_latent = self.alg.actor_critic.actor.infer_scandots_latent(obs)
                     scandots_latent_buffer.append(scandots_latent)
+                    # 学生策略预测depth_latent和yaw角度
                     obs_prop_depth = obs[:, :self.env.cfg.env.n_proprio].clone()
-                    obs_prop_depth[:, 6:8] = 0
+                    obs_prop_depth[:, 6:8] = 0  # 将观测中真实的偏航角信息清零
                     depth_latent_and_yaw = self.alg.depth_encoder(infos["depth"].clone(), obs_prop_depth)  # clone is crucial to avoid in-place operation
                     
                     depth_latent = depth_latent_and_yaw[:, :-2]

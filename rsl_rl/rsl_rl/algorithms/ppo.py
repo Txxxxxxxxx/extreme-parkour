@@ -143,7 +143,7 @@ class PPO:
         if self.actor_critic.is_recurrent:
             self.transition.hidden_states = self.actor_critic.get_hidden_states()
         # Compute the actions and values, use proprio to compute estimated priv_states then actions, but store true priv_states
-        if self.train_with_estimated_states:
+        if self.train_with_estimated_states:    # 使用估计的显式隐私状态（速度...）
             obs_est = obs.clone()
             priv_states_estimated = self.estimator(obs_est[:, :self.num_prop])
             obs_est[:, self.num_prop+self.num_scan:self.num_prop+self.num_scan+self.priv_states_dim] = priv_states_estimated
@@ -180,7 +180,7 @@ class PPO:
         last_values= self.actor_critic.evaluate(last_critic_obs).detach()
         self.storage.compute_returns(last_values, self.gamma, self.lam)
     
-
+    # 教师策略训练，同时更新估计器和适应模块
     def update(self):
         mean_value_loss = 0
         mean_surrogate_loss = 0
@@ -211,7 +211,7 @@ class PPO:
                 priv_reg_stage = min(max((self.counter - self.priv_reg_coef_schedual[2]), 0) / self.priv_reg_coef_schedual[3], 1)
                 priv_reg_coef = priv_reg_stage * (self.priv_reg_coef_schedual[1] - self.priv_reg_coef_schedual[0]) + self.priv_reg_coef_schedual[0]
 
-                # Estimator
+                # Estimator 估计器
                 priv_states_predicted = self.estimator(obs_batch[:, :self.num_prop])  # obs in batch is with true priv_states
                 estimator_loss = (priv_states_predicted - obs_batch[:, self.num_prop+self.num_scan:self.num_prop+self.num_scan+self.priv_states_dim]).pow(2).mean()
                 self.estimator_optimizer.zero_grad()
@@ -281,7 +281,7 @@ class PPO:
         self.storage.clear()
         self.update_counter()
         return mean_value_loss, mean_surrogate_loss, mean_estimator_loss, mean_discriminator_loss, mean_discriminator_acc, mean_priv_reg_loss, priv_reg_coef
-
+    # 更新适应模块
     def update_dagger(self):
         mean_hist_latent_loss = 0
         if self.actor_critic.is_recurrent:
@@ -309,7 +309,7 @@ class PPO:
         self.storage.clear()
         self.update_counter()
         return mean_hist_latent_loss
-
+    # 更新深度图编码器
     def update_depth_encoder(self, depth_latent_batch, scandots_latent_batch):
         # Depth encoder ditillation
         if self.if_depth:
@@ -321,7 +321,7 @@ class PPO:
             nn.utils.clip_grad_norm_(self.depth_encoder.parameters(), self.max_grad_norm)
             self.depth_encoder_optimizer.step()
             return depth_encoder_loss.item()
-    
+    # 同时更新actor网络和yaw估计网络，也会间接更新深度图编码器
     def update_depth_actor(self, actions_student_batch, actions_teacher_batch, yaw_student_batch, yaw_teacher_batch):
         if self.if_depth:
             depth_actor_loss = (actions_teacher_batch.detach() - actions_student_batch).norm(p=2, dim=1).mean()
@@ -334,7 +334,7 @@ class PPO:
             nn.utils.clip_grad_norm_(self.depth_actor.parameters(), self.max_grad_norm)
             self.depth_actor_optimizer.step()
             return depth_actor_loss.item(), yaw_loss.item()
-    
+    # 同时更新深度图编码器和actor网络
     def update_depth_both(self, depth_latent_batch, scandots_latent_batch, actions_student_batch, actions_teacher_batch):
         if self.if_depth:
             depth_encoder_loss = (scandots_latent_batch.detach() - depth_latent_batch).norm(p=2, dim=1).mean()

@@ -51,7 +51,7 @@ class StateHistoryEncoder(nn.Module):
         self.encoder = nn.Sequential(
                 nn.Linear(input_size, 3 * channel_size), self.activation_fn,
                 )
-
+        # 使用一维卷积 (nn.Conv1d) 来处理时间序列数据
         if tsteps == 50:
             self.conv_layers = nn.Sequential(
                     nn.Conv1d(in_channels = 3 * channel_size, out_channels = 2 * channel_size, kernel_size = 8, stride = 4), self.activation_fn,
@@ -75,13 +75,13 @@ class StateHistoryEncoder(nn.Module):
                 )
 
     def forward(self, obs):
-        # nd * T * n_proprio
+        # nd * T * n_proprio 环境数* 时间步数 * 每个时间步的观测维度
         nd = obs.shape[0]
         T = self.tsteps
         # print("obs device", obs.device)
         # print("encoder device", next(self.encoder.parameters()).device)
         projection = self.encoder(obs.reshape([nd * T, -1])) # do projection for n_proprio -> 32
-        output = self.conv_layers(projection.reshape([nd, T, -1]).permute((0, 2, 1)))
+        output = self.conv_layers(projection.reshape([nd, T, -1]).permute((0, 2, 1)))   # 将 [nd, T, C] 转换成了 [nd, C, T]
         output = self.linear_output(output)
         return output
 
@@ -99,12 +99,12 @@ class Actor(nn.Module):
         super().__init__()
         # prop -> scan -> priv_explicit -> priv_latent -> hist
         # actor input: prop -> scan -> priv_explicit -> latent
-        self.num_prop = num_prop
-        self.num_scan = num_scan
-        self.num_hist = num_hist
+        self.num_prop = num_prop    # 每个时间步的状态维度
+        self.num_scan = num_scan    # 每个时间步的扫描点维度
+        self.num_hist = num_hist    # 历史时间步数
         self.num_actions = num_actions
-        self.num_priv_latent = num_priv_latent
-        self.num_priv_explicit = num_priv_explicit
+        self.num_priv_latent = num_priv_latent  # 特权的潜在维度
+        self.num_priv_explicit = num_priv_explicit  # 特权的显式维度
         self.if_scan_encode = scan_encoder_dims is not None and num_scan > 0
 
         if len(priv_encoder_dims) > 0:
@@ -114,12 +114,12 @@ class Actor(nn.Module):
                     for l in range(len(priv_encoder_dims) - 1):
                         priv_encoder_layers.append(nn.Linear(priv_encoder_dims[l], priv_encoder_dims[l + 1]))
                         priv_encoder_layers.append(activation)
-                    self.priv_encoder = nn.Sequential(*priv_encoder_layers)
+                    self.priv_encoder = nn.Sequential(*priv_encoder_layers) # 用来编码特权信息成latent
                     priv_encoder_output_dim = priv_encoder_dims[-1]
         else:
             self.priv_encoder = nn.Identity()
             priv_encoder_output_dim = num_priv_latent
-
+        # 从历史信息编码latent
         self.history_encoder = StateHistoryEncoder(activation, num_prop, num_hist, priv_encoder_output_dim)
 
         if self.if_scan_encode:
@@ -133,17 +133,17 @@ class Actor(nn.Module):
                 else:
                     scan_encoder.append(nn.Linear(scan_encoder_dims[l], scan_encoder_dims[l + 1]))
                     scan_encoder.append(activation)
-            self.scan_encoder = nn.Sequential(*scan_encoder)
+            self.scan_encoder = nn.Sequential(*scan_encoder)    # 用来编码扫描点信息成latent
             self.scan_encoder_output_dim = scan_encoder_dims[-1]
         else:
             self.scan_encoder = nn.Identity()
             self.scan_encoder_output_dim = num_scan
         
         actor_layers = []
-        actor_layers.append(nn.Linear(num_prop+
+        actor_layers.append(nn.Linear(num_prop+     # 普通的观察
                                       self.scan_encoder_output_dim+
-                                      num_priv_explicit+
-                                      priv_encoder_output_dim, 
+                                      num_priv_explicit+    # 特权显式信息，如线速度
+                                      priv_encoder_output_dim,  # 特权信息编码
                                       actor_hidden_dims[0]))
         actor_layers.append(activation)
         for l in range(len(actor_hidden_dims)):
@@ -156,10 +156,12 @@ class Actor(nn.Module):
             actor_layers.append(nn.Tanh())
         self.actor_backbone = nn.Sequential(*actor_layers)
 
+    # obs的组成 [current_proprio, current_scan, current_priv_explicit, current_priv_latent, history_buffer]
+    # 其中 history_buffer 是过去 N 个时间步的自身状态 proprio 拼接而成的。
     def forward(self, obs, hist_encoding: bool, eval=False, scandots_latent=None):
         if not eval:
-            if self.if_scan_encode:
-                obs_scan = obs[:, self.num_prop:self.num_prop + self.num_scan]
+            if self.if_scan_encode: # 如果编码scan（教师策略）
+                obs_scan = obs[:, self.num_prop:self.num_prop + self.num_scan]  # 从完整的obs中提取scan点
                 if scandots_latent is None:
                     scan_latent = self.scan_encoder(obs_scan)   
                 else:
@@ -169,10 +171,10 @@ class Actor(nn.Module):
                 obs_prop_scan = obs[:, :self.num_prop + self.num_scan]
             obs_priv_explicit = obs[:, self.num_prop + self.num_scan:self.num_prop + self.num_scan + self.num_priv_explicit]
             if hist_encoding:
-                latent = self.infer_hist_latent(obs)
+                latent = self.infer_hist_latent(obs)    # 想要从历史的普通obs编码得到隐式priv的编码
             else:
-                latent = self.infer_priv_latent(obs)
-            backbone_input = torch.cat([obs_prop_scan, obs_priv_explicit, latent], dim=1)
+                latent = self.infer_priv_latent(obs)    # 编码得到 隐式特权观察的编码
+            backbone_input = torch.cat([obs_prop_scan, obs_priv_explicit, latent], dim=1)   
             backbone_output = self.actor_backbone(backbone_input)
             return backbone_output
         else:
@@ -199,7 +201,7 @@ class Actor(nn.Module):
         return self.priv_encoder(priv)
     
     def infer_hist_latent(self, obs):
-        hist = obs[:, -self.num_hist*self.num_prop:]
+        hist = obs[:, -self.num_hist*self.num_prop:]    # 提取his
         return self.history_encoder(hist.view(-1, self.num_hist, self.num_prop))
     
     def infer_scandots_latent(self, obs):

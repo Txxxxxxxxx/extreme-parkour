@@ -39,14 +39,15 @@ class Estimator(nn.Module):
         with torch.no_grad():
             return self.estimator(input)
 
+# 分类器，用于区分不同的技能或状态。它通常用于强化学习中的技能发现或对抗学习
 class Discriminator(nn.Module):
     def __init__(self, n_states, 
                  n_skills, 
                  hidden_dims=[256, 128, 64], 
                  activation="elu"):
         super(Discriminator, self).__init__()
-        self.n_states = n_states
-        self.n_skills = n_skills
+        self.n_states = n_states    # 输入状态的维度
+        self.n_skills = n_skills    # 输出技能的维度（分类数量）
 
         activation = get_activation(activation)
         discriminator_layers = []
@@ -76,6 +77,7 @@ class Discriminator(nn.Module):
         with torch.no_grad():
             return self.discriminator(states)
 
+# 一种特殊的分类器，使用了 spectral_norm（谱归一化）来稳定训练过程，通常用于对抗学习。
 class DiscriminatorLSD(nn.Module):
     def __init__(self, n_states, 
                  n_skills, 
@@ -104,7 +106,8 @@ class DiscriminatorLSD(nn.Module):
     def inference(self, states):
         with torch.no_grad():
             return self.discriminator(states)
-        
+
+# 一种连续技能分类器，通常用于 DIAYN（Diversity Is All You Need）算法。它的输出经过归一化处理。
 class DiscriminatorContDIAYN(nn.Module):
     def __init__(self, n_states, 
                  n_skills, 
